@@ -164,13 +164,28 @@ export async function renderMercadoCompra(container) {
         document.getElementById('m-mercado').value = resultado.mercado;
       }
       if (Array.isArray(resultado.itens) && resultado.itens.length) {
-        itensTemp = resultado.itens.map(item => ({
-          id: uid(), nome: item.nomeGenerico || item.nome || '', marca: item.marca || '',
-          quantidade: item.quantidade ?? '',
-          precoUnitario: item.precoUnitario ?? '', lidoPorIA: true
-        }));
+        let corrigidos = 0;
+        itensTemp = resultado.itens.map(item => {
+          // A IA às vezes acerta o preço total do cupom mas erra a quantidade (ex: lê "1" quando eram 3 unidades).
+          // Como ela também devolve precoTotal, usamos isso pra conferir e corrigir a quantidade quando bate a conta.
+          let quantidade = item.quantidade ?? '';
+          const precoUnitario = item.precoUnitario ?? '';
+          const pu = parseFloat(precoUnitario);
+          const pt = parseFloat(item.precoTotal);
+          if (pu > 0 && !isNaN(pt)) {
+            const qtdCalculada = Math.round((pt / pu) * 100) / 100;
+            if (Math.abs(qtdCalculada - (parseFloat(quantidade) || 0)) > 0.05 && qtdCalculada > 0) {
+              quantidade = qtdCalculada;
+              corrigidos++;
+            }
+          }
+          return {
+            id: uid(), nome: item.nomeGenerico || item.nome || '', marca: item.marca || '',
+            quantidade, precoUnitario, lidoPorIA: true
+          };
+        });
         renderItensLista();
-        status.textContent = `${resultado.itens.length} item(ns) lido(s). Revise antes de salvar.`;
+        status.textContent = `${resultado.itens.length} item(ns) lido(s)${corrigidos ? ` (${corrigidos} quantidade(s) corrigida(s) com base no valor total)` : ''}. Revise as quantidades antes de salvar.`;
       } else {
         status.textContent = 'A IA não encontrou itens legíveis nessa foto.';
       }

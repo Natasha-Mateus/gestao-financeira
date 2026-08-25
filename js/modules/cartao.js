@@ -46,17 +46,22 @@ export async function removerLancamentoEspelho(origem, origemId) {
   if (existing) await deleteDoc(doc(db, 'cartaoLancamentos', existing.id));
 }
 
-// Uma compra de Mercado com pagamento dividido pode gerar mais de um lançamento-espelho no Cartão
-// (um por parte paga no crédito). Cada parte usa origemId = `${compraId}::${pagamentoId}`.
-// Esta função remove TODOS os espelhos de uma compra (formato antigo de forma única + partes novas),
-// útil antes de recriá-los numa edição, ou ao excluir a compra inteira.
-export async function removerLancamentosEspelhoMercado(compraId) {
+// Um lançamento (Mercado ou Variáveis) com pagamento dividido pode gerar mais de um lançamento-espelho
+// no Cartão (um por parte paga no crédito). Cada parte usa origemId = `${lancamentoId}::${pagamentoId}`.
+// Esta função remove TODOS os espelhos de um lançamento (formato antigo de forma única + partes novas),
+// útil antes de recriá-los numa edição, ou ao excluir o lançamento inteiro.
+export async function removerLancamentosEspelhoDeOrigem(origem, origemId) {
   const snap = await new Promise(res => { const u = onSnapshot(query(lancamentosCol), s => { res(s); u(); }); });
   const alvo = snap.docs.filter(d => {
     const data = d.data();
-    return data.origem === 'mercado' && (data.origemId === compraId || (data.origemId || '').startsWith(`${compraId}::`));
+    return data.origem === origem && (data.origemId === origemId || (data.origemId || '').startsWith(`${origemId}::`));
   });
   for (const d of alvo) await deleteDoc(doc(db, 'cartaoLancamentos', d.id));
+}
+
+// Mantido por compatibilidade com quem já importa este nome específico.
+export async function removerLancamentosEspelhoMercado(compraId) {
+  return removerLancamentosEspelhoDeOrigem('mercado', compraId);
 }
 
 // Retorna as parcelas de um lançamento já distribuídas por mês de competência (fatura),
@@ -190,7 +195,7 @@ export function renderCartaoCartoes(container) {
             <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px">
               <div class="grid grid-4" style="margin-bottom:16px">
                 <div class="ledger-figure"><div class="value">${c.limite ? formatBRL(c.limite) : '-'}</div><div class="label">Limite</div></div>
-                <div class="ledger-figure"><div class="value">${formatBRL(totalFatura)}</div><div class="label">Gasto na fatura</div></div>
+                <div class="ledger-figure"><div class="value">${formatBRL(totalFatura)}</div><div class="label">Despesa na fatura</div></div>
                 <div class="ledger-figure"><div class="value" style="color:var(--olive)">${c.limite ? formatBRL(Math.max(0, c.limite - totalFatura)) : '-'}</div><div class="label">Limite disponível</div></div>
                 <div class="ledger-figure"><div class="value">${percentual !== null ? percentual.toFixed(0) + '%' : '-'}</div><div class="label">Do limite usado</div></div>
               </div>
@@ -411,8 +416,8 @@ export function renderCartaoVale(container) {
       render();
     });
 
-    function renderTipo(elId, tipo, compras) {
-      const r = calcularValeAcumulado(tipo, mes, configs, compras);
+    function renderTipo(elId, tipo, compras, despesasVariaveisVale) {
+      const r = calcularValeAcumulado(tipo, mes, configs, compras, despesasVariaveisVale);
       const percentual = r.saldoDisponivel > 0 ? Math.min(100, (r.gastoMes / r.saldoDisponivel) * 100) : 0;
       document.getElementById(elId).innerHTML = `
         <div class="grid grid-2">
@@ -426,12 +431,21 @@ export function renderCartaoVale(container) {
       `;
     }
 
-    const unsub = onSnapshot(query(mercadoComprasCol), (snap) => {
-      const compras = snap.docs.map(d => d.data());
-      renderTipo('vale-resumo-livre', 'livre', compras);
-      renderTipo('vale-resumo-voucher', 'voucher', compras);
+    let comprasCache = [];
+    let despesasValeCache = [];
+    function renderAmbos() {
+      renderTipo('vale-resumo-livre', 'livre', comprasCache, despesasValeCache);
+      renderTipo('vale-resumo-voucher', 'voucher', comprasCache, despesasValeCache);
+    }
+    const unsubA = onSnapshot(query(mercadoComprasCol), (snap) => {
+      comprasCache = snap.docs.map(d => d.data());
+      renderAmbos();
     });
-    unsubs.push(unsub);
+    const unsubB = onSnapshot(query(collection(db, 'variaveisDespesas')), (snap) => {
+      despesasValeCache = snap.docs.map(d => d.data()).filter(v => v.categoria === 'Mercado');
+      renderAmbos();
+    });
+    unsubs.push(unsubA, unsubB);
   }
 
   render();
@@ -816,7 +830,7 @@ export function renderCartaoFaturas(container) {
 
 // Calcula o saldo do vale (Livre ou Voucher) considerando o acúmulo mês a mês:
 // saldo disponível = restante do mês anterior + entrada deste mês; saldo restante = disponível - gasto.
-function calcularValeAcumulado(tipo, mesAlvo, configs, compras) {
+function calcularValeAcumulado(tipo, mesAlvo, configs, compras, despesasVariaveisVale = []) {
   const mesesConfig = configs.map(c => c.mes).sort();
   if (!mesesConfig.length || mesesConfig[0] > mesAlvo) {
     return { entradaMes: 0, gastoMes: 0, saldoDisponivel: 0, saldoRestante: 0 };
@@ -827,9 +841,15 @@ function calcularValeAcumulado(tipo, mesAlvo, configs, compras) {
   while (mesIter <= mesAlvo) {
     const config = configs.find(c => c.mes === mesIter);
     const entrada = config ? (tipo === 'livre' ? (config.valorMensalLivre || 0) : (config.valorMensalVoucher || 0)) : 0;
-    const gasto = compras
+    const gastoCompras = compras
       .filter(c => monthRefFromDate(c.data) === mesIter)
       .reduce((s, c) => s + valorValeDaCompra(c, 'Natasha', tipo), 0);
+    // Mercado lançado direto em Variáveis (sem controle de itens) e pago no vale também conta aqui
+    // (despesasVariaveisVale já vem filtrado por categoria==='Mercado'; valorValeDaCompra extrai a parte no vale).
+    const gastoVariaveis = despesasVariaveisVale
+      .filter(v => monthRefFromDate(v.data) === mesIter)
+      .reduce((s, v) => s + valorValeDaCompra(v, 'Natasha', tipo), 0);
+    const gasto = gastoCompras + gastoVariaveis;
     const disponivel = carryOver + entrada;
     const restante = disponivel - gasto;
     resultado = { entradaMes: entrada, gastoMes: gasto, saldoDisponivel: disponivel, saldoRestante: restante };

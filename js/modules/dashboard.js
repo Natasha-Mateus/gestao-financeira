@@ -47,7 +47,7 @@ export function renderDashboard(container) {
         <div id="card-vale" style="margin-top:12px"></div>
       </div>
       <div class="card">
-        <h3>Gasto por categoria</h3>
+        <h3>Despesa por categoria</h3>
         <div id="card-categorias" style="margin-top:12px"></div>
       </div>
     </div>
@@ -93,11 +93,11 @@ export function renderDashboard(container) {
         calcularProjecaoDetalhada(saldoAtualReal, mesesAFrente).then(proj => {
           document.getElementById('saldo-resumo-topo').innerHTML = `
             <div class="ledger-figure"><div class="value">${formatBRL(proj.saldoProjetado)}</div><div class="label">Saldo projetado para ${mes}</div></div>
-            <div class="ledger-figure"><div class="value" style="color:var(--olive)">${formatBRL(proj.totalEntradasPrevistas)}</div><div class="label">Entradas previstas (recorrentes, ${mesesAFrente} mês(es))</div></div>
+            <div class="ledger-figure"><div class="value" style="color:var(--olive)">${formatBRL(proj.totalEntradasPrevistas)}</div><div class="label">Entradas previstas (recorrentes + avulsas, ${mesesAFrente} mês(es))</div></div>
             <div class="ledger-figure"><div class="value" style="color:var(--terracota)">${formatBRL(proj.totalSaidasPrevistas)}</div><div class="label">Saídas previstas (${mesesAFrente} mês(es))</div></div>
           `;
           listaEl.innerHTML = `
-            <p style="color:var(--text-dim); font-size:13px">Saldo atual (${formatBRL(saldoAtualReal)}) + receitas recorrentes − contas fixas − cartão (parcelas e recorrências já lançadas), somado mês a mês até ${mes}. Variáveis e Mercado à vista já registrados não entram aqui porque já foram descontados do saldo atual na hora do lançamento; os pagos no crédito já estão contados dentro do Cartão.</p>
+            <p style="color:var(--text-dim); font-size:13px">Saldo atual (${formatBRL(saldoAtualReal)}) + receitas recorrentes + entradas avulsas previstas − contas fixas − cartão (parcelas e recorrências já lançadas), somado mês a mês até ${mes}. Variáveis e Mercado à vista já registrados não entram aqui porque já foram descontados do saldo atual na hora do lançamento; os pagos no crédito já estão contados dentro do Cartão.</p>
             <div class="grid grid-2" style="margin-top:12px">
               <div class="ledger-figure"><div class="value" style="font-size:16px">${formatBRL(proj.totalFixasPrevisto)}</div><div class="label">Contas fixas</div></div>
               <div class="ledger-figure"><div class="value" style="font-size:16px">${formatBRL(proj.totalCartaoPrevisto)}</div><div class="label">Cartão (já lançado)</div></div>
@@ -132,17 +132,19 @@ export function renderDashboard(container) {
       const mesesAlvo = [];
       for (let i = 1; i <= mesesAFrente; i++) mesesAlvo.push(addMonths(currentMonthRef(), i));
 
-      const [snapCartoes, snapLancs, snapRec] = await Promise.all([
+      const [snapCartoes, snapLancs, snapRec, snapEntradas] = await Promise.all([
         new Promise(res => { const u = onSnapshot(query(collection(db, 'cartoes')), s => { res(s); u(); }); }),
         new Promise(res => { const u = onSnapshot(query(collection(db, 'cartaoLancamentos')), s => { res(s); u(); }); }),
-        new Promise(res => { const u = onSnapshot(query(collection(db, 'cartaoRecorrentes')), s => { res(s); u(); }); })
+        new Promise(res => { const u = onSnapshot(query(collection(db, 'cartaoRecorrentes')), s => { res(s); u(); }); }),
+        new Promise(res => { const u = onSnapshot(query(collection(db, 'entradas')), s => { res(s); u(); }); })
       ]);
 
       const cartoesTodos = snapCartoes.docs.map(d => ({ id: d.id, ...d.data() }));
       const lancs = snapLancs.docs.map(d => d.data());
       const recorrentes = snapRec.docs.map(d => d.data());
+      const entradasTodas = snapEntradas.docs.map(d => d.data());
 
-      let totalFixasPrevisto = 0, totalCartaoPrevisto = 0;
+      let totalFixasPrevisto = 0, totalCartaoPrevisto = 0, totalEntradasPlanejadas = 0;
 
       mesesAlvo.forEach(mAlvo => {
         totalFixasPrevisto += totalFixasTemplateSum;
@@ -156,9 +158,14 @@ export function renderDashboard(container) {
         recorrentes.forEach(r => {
           if (r.mesInicio && r.mesInicio <= mAlvo) totalCartaoPrevisto += r.valor;
         });
+
+        // Entradas previstas avulsas (não recorrentes), marcadas como "previsto" e ainda não efetivadas, do mês alvo.
+        totalEntradasPlanejadas += entradasTodas
+          .filter(e => e.previsto && e.efetivada === false && monthRefFromDate(e.data) === mAlvo)
+          .reduce((s, e) => s + (e.valor || 0), 0);
       });
 
-      const totalEntradasPrevistas = mesesAFrente * totalReceitasRecorrentes;
+      const totalEntradasPrevistas = (mesesAFrente * totalReceitasRecorrentes) + totalEntradasPlanejadas;
       const totalSaidasPrevistas = totalFixasPrevisto + totalCartaoPrevisto;
       const saldoProjetado = saldoAtualReal + totalEntradasPrevistas - totalSaidasPrevistas;
 
@@ -185,6 +192,7 @@ export function renderDashboard(container) {
     // Mercado (não filtrado por pessoa/categoria — é sempre do casal)
     // O vale alimentação é isolado do caixa do casal: não conta como gasto real.
     let todasComprasMercado = [];
+    let todasDespesasVariaveisMercadoVale = [];
     let comprasReaisContagem = 0, totalMercadoDeCompras = 0, totalMercadoDeVariaveis = 0;
 
     function atualizarCardMercado() {
@@ -219,13 +227,13 @@ export function renderDashboard(container) {
     cachedUnsubs.push(u1b);
 
     function figuraVale(tipo) {
-      const r = calcularValeAcumulado(tipo, mes, todosValeConfigs, todasComprasMercado);
+      const r = calcularValeAcumulado(tipo, mes, todosValeConfigs, todasComprasMercado, todasDespesasVariaveisMercadoVale);
       const percentual = r.saldoDisponivel > 0 ? Math.min(100, (r.gastoMes / r.saldoDisponivel) * 100) : 0;
       return `
         <div>
           <div style="color:var(--text-dim); font-size:12px; text-transform:uppercase; margin-bottom:6px">${tipo === 'livre' ? 'Livre' : 'Voucher'}</div>
           <div class="grid grid-2">
-            <div class="ledger-figure"><div class="value">${formatBRL(r.gastoMes)}</div><div class="label">Gasto no mês</div></div>
+            <div class="ledger-figure"><div class="value">${formatBRL(r.gastoMes)}</div><div class="label">Despesa no mês</div></div>
             <div class="ledger-figure"><div class="value" style="color:${r.saldoRestante >= 0 ? 'var(--olive)' : 'var(--terracota)'}">${formatBRL(r.saldoRestante)}</div><div class="label">Restante</div></div>
           </div>
           <div style="margin-top:8px; background:var(--surface-2); border-radius:6px; height:8px; overflow:hidden">
@@ -241,7 +249,7 @@ export function renderDashboard(container) {
           ${figuraVale('livre')}
           ${figuraVale('voucher')}
         </div>
-        <p style="color:var(--text-dim); font-size:13px; margin-top:12px">Não entra no "Total gasto no mês" do casal — é um benefício à parte. O saldo que sobra acumula pro mês seguinte.</p>
+        <p style="color:var(--text-dim); font-size:13px; margin-top:12px">Não entra no "Total de despesas do mês" do casal — é um benefício à parte. O saldo que sobra acumula pro mês seguinte.</p>
       `;
     }
 
@@ -314,20 +322,27 @@ export function renderDashboard(container) {
 
     // Variáveis
     const u3 = onSnapshot(query(collection(db, 'variaveisDespesas')), (snap) => {
-      let despesas = snap.docs.map(d => d.data()).filter(v => monthRefFromDate(v.data) === mes);
+      const todasDespesas = snap.docs.map(d => d.data());
+      // Vale gasto em Mercado lançado por Variáveis também entra no acúmulo do Vale Alimentação (todos os meses, não só o filtrado).
+      // Passa todas as despesas de Mercado (não só as com formaPagamento==='vale'): despesas com pagamento dividido
+      // podem ter só uma parte no vale, e valorValeDaCompra sabe extrair essa parte de qualquer formato.
+      todasDespesasVariaveisMercadoVale = todasDespesas.filter(v => v.categoria === 'Mercado');
+
+      let despesas = todasDespesas.filter(v => monthRefFromDate(v.data) === mes);
       if (pessoaFiltro !== 'todos') despesas = despesas.filter(v => v.pessoa === pessoaFiltro || v.pessoa === 'Casal');
       if (categoriaFiltro !== 'todas') despesas = despesas.filter(v => v.categoria === categoriaFiltro);
 
-      // Mercado lançado em Variáveis (sem controle de itens) conta junto com o Mercado detalhado,
-      // não como "Variáveis" — só quando à vista (crédito já cai no Cartão; vale não entra no caixa do casal).
-      const mercadoAVista = despesas.filter(v => v.categoria === 'Mercado' && ['dinheiro', 'debito', 'pix'].includes(v.formaPagamento));
-      const outrasDespesas = despesas.filter(v => !(v.categoria === 'Mercado' && ['dinheiro', 'debito', 'pix'].includes(v.formaPagamento)));
+      // Mercado lançado em Variáveis (sem controle de itens) conta junto com o Mercado detalhado, independente
+      // de qual forma de pagamento — igual ao Mercado com itens: só exclui a parte paga no vale (não é caixa do casal).
+      const mercadoDespesas = despesas.filter(v => v.categoria === 'Mercado');
+      const outrasDespesas = despesas.filter(v => v.categoria !== 'Mercado');
 
-      totalMercadoDeVariaveis = mercadoAVista.reduce((s, v) => s + v.valorTotal, 0);
+      totalMercadoDeVariaveis = mercadoDespesas.reduce((s, v) => s + valorNaoValeDaCompra(v), 0);
       totalVariaveis = outrasDespesas.reduce((s, v) => s + v.valorTotal, 0);
       despesas.forEach(v => { categoriaTotais[v.categoria] = (categoriaTotais[v.categoria] || 0) + v.valorTotal; });
 
       atualizarCardMercado();
+      atualizarCardVale();
       atualizarResumo(); atualizarCategorias();
     });
     cachedUnsubs.push(u3);

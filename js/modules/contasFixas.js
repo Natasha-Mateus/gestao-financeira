@@ -134,7 +134,7 @@ export function renderContasFixas(container) {
 
       listaEl.querySelectorAll('[data-ignorar]').forEach(btn => {
         btn.addEventListener('click', async () => {
-          if (!confirm('Remover essa conta fixa só deste mês? Ela volta a aparecer normalmente no mês seguinte. Lembre-se de lançar o gasto real em Variáveis ou Cartão.')) return;
+          if (!confirm('Remover essa conta fixa só deste mês? Ela volta a aparecer normalmente no mês seguinte. Lembre-se de lançar a despesa real em Variáveis ou Cartão.')) return;
           await addDoc(statusCol, { templateId: btn.dataset.ignorar, mes, status: 'ignorado' });
         });
       });
